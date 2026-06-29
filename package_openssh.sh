@@ -86,7 +86,7 @@ else
 1. CentOS 7.x 全系列
 2. BCLinux 8.x 全系列
 3. Rocky Linux 8.x / 9.x
-4. CTyunOS 2.0.1"
+4. CTyunOS 2.0.1 / 23.01"
 fi
 
 info "发行版ID: ${ID} | 完整版本: ${VERSION_ID} | 主版本: ${MAJOR_VER}"
@@ -96,7 +96,7 @@ info "待编译 OpenSSH 版本: ${OPENSSH_VERSION}"
 # 标记：是否需要刷新软件源缓存
 SKIP_CACHE_REFRESH=0
 
-# 3、处理CtyunOS 2.0.1软件源替换逻辑
+# 3、处理CtyunOS软件源替换逻辑：仅2.0.1替换域名，23.01不处理
 info "【步骤3】处理系统软件源地址"
 if [[ "${ID}" == "ctyunos" && "${VERSION_ID}" == "2.0.1" ]]; then
     info "【执行】检查repo文件是否已替换为新域名"
@@ -109,7 +109,7 @@ if [[ "${ID}" == "ctyunos" && "${VERSION_ID}" == "2.0.1" ]]; then
         info "URL替换完成，需要重建源缓存"
     fi
 else
-    # CentOS / BCLinux / Rocky：无repo修改则跳过缓存刷新
+    # CentOS / BCLinux / Rocky / CtyunOS23.01：无repo修改则跳过缓存刷新
     info "【执行】检测本地repo文件是否发生变更"
     if find ${REPO_DIR} -name "*.repo" -mmin -5 | grep -q .; then
         info "检测到repo文件近期有修改，执行缓存重建"
@@ -131,20 +131,24 @@ if [[ ${SKIP_CACHE_REFRESH} -eq 0 ]]; then
     else
         err "软件源拉取repomd.xml失败，排查：
 1. rm -rf /var/cache/dnf/* 清空缓存
-2. curl 测试repo.ctyun.cn连通性
-3. NO_PROXY添加repo.ctyun.cn避免代理504"
+2. curl 测试repo连通性
+3. NO_PROXY添加内网域名避免代理504"
     fi
 else
     info "【步骤4】已跳过源缓存刷新流程"
 fi
 
 # 5、安装编译依赖
+# 原有CentOS/Rocky/CtyunOS保留libedit-devel不变；仅BCLinux移除该包
 info "【步骤5】安装OpenSSH全套编译依赖包"
 if [[ "${OS_TAG}" == "el7" ]]; then
-    info "【执行】yum 安装编译依赖"
+    info "【执行】yum 安装编译依赖（CentOS7）"
     ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel libedit-devel rpm-build wget tar curl
+elif [[ "${ID}" == "bclinux" ]]; then
+    info "【执行】dnf 安装编译依赖（BC-Linux8，无libedit/editline包，剔除）"
+    ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel rpm-build wget tar curl perl-generators
 else
-    info "【执行】dnf 安装编译依赖"
+    info "【执行】dnf 安装编译依赖（Rocky/CtyunOS）"
     ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel libedit-devel rpm-build wget tar curl perl-generators
 fi
 
