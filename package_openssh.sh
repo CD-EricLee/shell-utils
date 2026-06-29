@@ -109,7 +109,6 @@ if [[ "${ID}" == "ctyunos" && "${VERSION_ID}" == "2.0.1" ]]; then
         info "URL替换完成，需要重建源缓存"
     fi
 else
-    # CentOS / BCLinux / Rocky / CtyunOS23.01：无repo修改则跳过缓存刷新
     info "【执行】检测本地repo文件是否发生变更"
     if find ${REPO_DIR} -name "*.repo" -mmin -5 | grep -q .; then
         info "检测到repo文件近期有修改，执行缓存重建"
@@ -139,17 +138,18 @@ else
 fi
 
 # 5、安装编译依赖
-# 原有CentOS/Rocky/CtyunOS保留libedit-devel不变；仅BCLinux移除该包
+# CentOS/Rocky/CtyunOS保留libedit-devel；BC-Linux无该依赖直接剔除
+# Rocky9补充perl依赖，解决builddep报错
 info "【步骤5】安装OpenSSH全套编译依赖包"
 if [[ "${OS_TAG}" == "el7" ]]; then
     info "【执行】yum 安装编译依赖（CentOS7）"
     ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel libedit-devel rpm-build wget tar curl
 elif [[ "${ID}" == "bclinux" ]]; then
-    info "【执行】dnf 安装编译依赖（BC-Linux8，无libedit/editline包，剔除）"
-    ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel rpm-build wget tar curl perl-generators
+    info "【执行】dnf 安装编译依赖（BC-Linux8 适配，剔除不存在的依赖）"
+    ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel rpm-build wget tar curl perl-generators perl
 else
-    info "【执行】dnf 安装编译依赖（Rocky/CtyunOS）"
-    ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel libedit-devel rpm-build wget tar curl perl-generators
+    info "【执行】dnf 安装编译依赖（Rocky/CtyunOS，补充perl）"
+    ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel libedit-devel rpm-build wget tar curl perl-generators perl
 fi
 
 # 6、初始化标准rpmbuild目录
@@ -176,48 +176,36 @@ info "源码包下载完成：${SOURCES_DIR}/${TARBALL}"
 
 # 8、处理spec，关闭x11/gnome askpass编译
 info "【步骤8】解压源码，拷贝并修复openssh.spec编译开关"
-info "【执行】临时解压源码包"
 TMP_EXTRACT=$(mktemp -d)
 tar -xf "${TARBALL}" -C "${TMP_EXTRACT}"
 
-info "【执行】复制原生spec至SPECS目录"
 cp "${TMP_EXTRACT}/openssh-${OPENSSH_VERSION}/contrib/redhat/openssh.spec" "${SPEC_PATH}"
-
-info "【执行】清理临时解压目录"
 rm -rf "${TMP_EXTRACT}"
 
-info "【执行】修改%global no_x11_askpass 值为1"
+# 关闭图形依赖，杜绝编译报错
 sed -i 's/^%global no_x11_askpass 0/%global no_x11_askpass 1/g' "${SPEC_PATH}"
-
-info "【执行】修改%global no_gnome_askpass 值为1"
 sed -i 's/^%global no_gnome_askpass 0/%global no_gnome_askpass 1/g' "${SPEC_PATH}"
 
-# 9、仅构建二进制包 -bb，规避-ba校验Source1报错
+# 9、仅构建二进制包 -bb
 info "【步骤9】切换rpmbuild根目录，仅构建二进制rpm（rpmbuild -bb）"
 cd "${RPMBUILD_ROOT}"
-
-info "【执行】rpmbuild -bb SPECS/openssh.spec"
 rpmbuild -bb SPECS/openssh.spec
 
-# 10、筛选openssh rpm并打包，修复压缩包路径找不到问题
-info "【步骤10】筛选openssh相关rpm，打包压缩为 ${OUTPUT_TAR}"
+# 10、筛选纯openssh rpm并打包
+info "【步骤10】筛选并打包所有 OpenSSH RPM"
 TMP_RPM_DIR=$(mktemp -d)
-info "【执行】复制仅openssh开头的rpm至临时目录"
 find "${RPMBUILD_ROOT}/RPMS" -name "openssh-*.rpm" -type f -exec cp {} "${TMP_RPM_DIR}/" \;
 
-info "【执行】打包压缩，压缩包直接输出到脚本原始目录 ${CURR_DIR}/${OUTPUT_TAR}"
 cd "${TMP_RPM_DIR}"
 tar -czf "${CURR_DIR}/${OUTPUT_TAR}" *.rpm
-
-info "【执行】清理临时rpm目录"
 rm -rf "${TMP_RPM_DIR}"
 
-# 校验压缩包是否生成成功
+# 最终校验压缩包
 if [ ! -f "${CURR_DIR}/${OUTPUT_TAR}" ]; then
-    err "压缩包生成失败，未找到文件：${CURR_DIR}/${OUTPUT_TAR}"
+    err "压缩包生成失败！"
 fi
 
-info "==================== RPM打包全部完成 ===================="
-info "生成压缩包路径：${CURR_DIR}/${OUTPUT_TAR}"
+info "==================== 编译打包全部完成 ===================="
+info "输出压缩包: ${CURR_DIR}/${OUTPUT_TAR}"
 ls -lh "${CURR_DIR}/${OUTPUT_TAR}"
 info "=========================================================="
