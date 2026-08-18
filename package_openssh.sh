@@ -186,10 +186,113 @@ rm -rf "${TMP_EXTRACT}"
 sed -i 's/^%global no_x11_askpass 0/%global no_x11_askpass 1/g' "${SPEC_PATH}"
 sed -i 's/^%global no_gnome_askpass 0/%global no_gnome_askpass 1/g' "${SPEC_PATH}"
 
+# OpenSSH 9.6+ 在 RHEL<=7 默认 %global without_openssl 1，编译出的 sshd 会显示 "without OpenSSL"
+# 修复 sftp 兼容性：改为 0 强制启用 OpenSSL，使 sshd -v 显示 "with OpenSSL"
+# 参考: https://blog.csdn.net/lhjlhj123123/article/details/141067589
+if grep -q '^%global without_openssl 1' "${SPEC_PATH}"; then
+    sed -i 's/^%global without_openssl 1/%global without_openssl 0/g' "${SPEC_PATH}"
+    info "【执行】启用 OpenSSL 编译开关（without_openssl 1→0），sshd 将显示 'with OpenSSL'"
+else
+    warn "未在 spec 中匹配到 'without_openssl 1' 行，可能 OpenSSH 版本<=9.5 或 spec 写法不同，跳过修改"
+fi
+
+# OpenSSL 1.1.1 自动编译安装：CentOS 7 自带 1.0.2，不满足 spec >=1.1.1 要求
+# 从 openssl.org 下载 1.1.1w（1.1.1 系列最终长期支持版）编译到 /usr/local/openssl11
+OPENSSL_PREFIX="/usr/local/openssl11"
+OPENSSL_SRC_VER="1.1.1w"
+OPENSSL_TARBALL="openssl-${OPENSSL_SRC_VER}.tar.gz"
+OPENSSL_URL="https://www.openssl.org/source/old/1.1.1/${OPENSSL_TARBALL}"
+
+if [[ "${OS_TAG}" == "el7" ]]; then
+    info "【执行】检测系统 OpenSSL 版本（spec 要求 >=1.1.1）"
+    SYS_OPENSSL_VER=$(openssl version 2>/dev/null | awk '{print $2}' || true)
+    info "系统 OpenSSL 版本：${SYS_OPENSSL_VER:-未知}"
+
+    # 判断系统 OpenSSL 是否已满足 >=1.1.1
+    NEED_BUILD_OPENSSL=0
+    if [[ -z "${SYS_OPENSSL_VER}" ]]; then
+        NEED_BUILD_OPENSSL=1
+    elif [[ "$(printf '%s\n' "1.1.1" "${SYS_OPENSSL_VER}" | sort -V | tail -1)" != "${SYS_OPENSSL_VER}" ]]; then
+        NEED_BUILD_OPENSSL=1
+    fi
+
+    # 已编译安装过则复用
+    if [[ -x "${OPENSSL_PREFIX}/bin/openssl" ]]; then
+        INSTALLED_VER=$("${OPENSSL_PREFIX}/bin/openssl" version 2>/dev/null | awk '{print $2}' || true)
+        if [[ -n "${INSTALLED_VER}" ]] \
+           && [[ "$(printf '%s\n' "1.1.1" "${INSTALLED_VER}" | sort -V | tail -1)" == "${INSTALLED_VER}" ]]; then
+            info "检测到已编译安装 OpenSSL ${INSTALLED_VER} 于 ${OPENSSL_PREFIX}，复用"
+            NEED_BUILD_OPENSSL=0
+        fi
+    fi
+
+    if [[ ${NEED_BUILD_OPENSSL} -eq 1 ]]; then
+        info "【执行】下载 OpenSSL 源码：${OPENSSL_URL}"
+        OPENSSL_TMP=$(mktemp -d)
+        if ! wget -q --no-check-certificate --timeout=${NETWORK_TIMEOUT} \
+                 -O "${OPENSSL_TMP}/${OPENSSL_TARBALL}" "${OPENSSL_URL}"; then
+            err "OpenSSL 源码下载失败，请检查外网/代理连通性"
+        fi
+
+        info "【执行】解压并编译 OpenSSL ${OPENSSL_SRC_VER} 到 ${OPENSSL_PREFIX}"
+        tar -xzf "${OPENSSL_TMP}/${OPENSSL_TARBALL}" -C "${OPENSSL_TMP}"
+        cd "${OPENSSL_TMP}/openssl-${OPENSSL_SRC_VER}"
+
+        # shared zlib 启用动态库；-fPIC 供后续 OpenSSH 链接到 RPM 中
+        if ! ./config --prefix="${OPENSSL_PREFIX}" --openssldir="${OPENSSL_PREFIX}/ssl" \
+                shared zlib -fPIC; then
+            err "OpenSSL ./config 失败"
+        fi
+        if ! make -j"$(nproc)" >/tmp/openssl_build.log 2>&1; then
+            tail -n 50 /tmp/openssl_build.log
+            err "OpenSSL make 失败，详见 /tmp/openssl_build.log"
+        fi
+        if ! make install >/tmp/openssl_install.log 2>&1; then
+            tail -n 50 /tmp/openssl_install.log
+            err "OpenSSL make install 失败，详见 /tmp/openssl_install.log"
+        fi
+
+        # 注册动态库路径，rpmbuild 时 configure/ld 能找到
+        echo "${OPENSSL_PREFIX}/lib" > /etc/ld.so.conf.d/openssl11.conf
+        ldconfig
+
+        info "OpenSSL ${OPENSSL_SRC_VER} 安装完成：${OPENSSL_PREFIX}/bin/openssl"
+        "${OPENSSL_PREFIX}/bin/openssl" version
+
+        rm -rf "${OPENSSL_TMP}"
+        cd "${SOURCES_DIR}"
+    fi
+
+    # 向 spec %configure 段注入 --with-ssl-dir，让 OpenSSH configure 链接到 1.1.1 而非系统 1.0.2
+    info "【执行】向 spec %configure 段注入 --with-ssl-dir=${OPENSSL_PREFIX}"
+    if grep -q -- "--with-ssl-dir=${OPENSSL_PREFIX}" "${SPEC_PATH}"; then
+        info "spec 中已存在 --with-ssl-dir=${OPENSSL_PREFIX}，跳过"
+    elif grep -q -- '--disable-strip' "${SPEC_PATH}"; then
+        awk -v prefix="${OPENSSL_PREFIX}" '
+            /--disable-strip/ {
+                print
+                print "\t--with-ssl-dir=" prefix " \\"
+                next
+            }
+            { print }
+        ' "${SPEC_PATH}" > "${SPEC_PATH}.new" && mv "${SPEC_PATH}.new" "${SPEC_PATH}"
+        info "已注入 --with-ssl-dir=${OPENSSL_PREFIX}"
+    else
+        err "spec 未找到 --disable-strip 锚点，无法注入 --with-ssl-dir，请人工检查 spec"
+    fi
+fi
+
 # 9、仅构建二进制包 -bb
 info "【步骤9】切换rpmbuild根目录，仅构建二进制rpm（rpmbuild -bb）"
 cd "${RPMBUILD_ROOT}"
-rpmbuild -bb SPECS/openssh.spec
+# CentOS 7 系统 openssl-devel 为 1.0.2，spec BuildRequires openssl-devel>=1.1.1 会触发 unsatisfied
+# 已手动编译 1.1.1 到 OPENSSL_PREFIX 并注入 --with-ssl-dir，用 --nodeps 跳过该版本检查
+if [[ "${OS_TAG}" == "el7" ]] && [[ -x "${OPENSSL_PREFIX:-/nonexistent}/bin/openssl" ]]; then
+    info "【执行】CentOS 7 已注入 OpenSSL 1.1.1，rpmbuild --nodeps 跳过 openssl-devel 版本检查"
+    rpmbuild -bb --nodeps SPECS/openssh.spec
+else
+    rpmbuild -bb SPECS/openssh.spec
+fi
 
 # 10、筛选纯openssh rpm并打包
 info "【步骤10】筛选并打包所有 OpenSSH RPM"
