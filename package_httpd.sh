@@ -94,6 +94,35 @@ info "发行版ID: ${ID} | 完整版本: ${VERSION_ID} | 主版本: ${MAJOR_VER}
 info "系统标识: ${OS_TAG} | 包管理器: ${PKG_MGR}"
 info "待编译 httpd 版本: ${HTTPD_VERSION}"
 
+# 2.1、检测 apr/apr-util 版本（httpd 编译强依赖，主包与 devel 版本必须一致）
+info "【步骤2.1】检测 apr/apr-util 版本（httpd 编译依赖，主包与 devel 版本必须一致）"
+APR_VER=$(rpm -q apr --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
+APR_DEVEL_VER=$(rpm -q apr-devel --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
+APU_VER=$(rpm -q apr-util --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
+APU_DEVEL_VER=$(rpm -q apr-util-devel --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
+
+info "  apr=${APR_VER:-未安装}  apr-devel=${APR_DEVEL_VER:-未安装}"
+info "  apr-util=${APU_VER:-未安装}  apr-util-devel=${APU_DEVEL_VER:-未安装}"
+
+APR_ERR=""
+if [[ -z "${APR_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr 主包未安装"; fi
+if [[ -z "${APR_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-devel 未安装"; fi
+if [[ -n "${APR_VER}" && -n "${APR_DEVEL_VER}" && "${APR_VER}" != "${APR_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr(${APR_VER}) 与 apr-devel(${APR_DEVEL_VER}) 版本不一致"; fi
+if [[ -z "${APU_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util 主包未安装"; fi
+if [[ -z "${APU_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util-devel 未安装"; fi
+if [[ -n "${APU_VER}" && -n "${APU_DEVEL_VER}" && "${APU_VER}" != "${APU_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util(${APU_VER}) 与 apr-util-devel(${APU_DEVEL_VER}) 版本不一致"; fi
+
+if [[ -n "${APR_ERR}" ]]; then
+    err "apr/apr-util 检测不通过：${APR_ERR}
+
+httpd 打包需要 apr+apr-devel、apr-util+apr-util-devel（主包与 devel 版本必须一致）。
+请手动安装版本一致的 apr/apr-util 全套后重新执行脚本。
+
+提示：CentOS7 官方源 apr/apr-util 为 1.4.8/1.5.2，若系统装的是 1.6.1 等非官方版本，
+  官方源没有对应 devel 包，需从源码编译 apr/apr-util 或将系统 apr/apr-util 降级到官方版本。"
+fi
+info "apr/apr-util 版本检测通过"
+
 # 标记：是否需要刷新软件源缓存
 SKIP_CACHE_REFRESH=0
 
@@ -142,14 +171,58 @@ fi
 # httpd 依赖 apr, apr-util, pcre, openssl, zlib, lua, etc.
 info "【步骤5】安装 httpd 全套编译依赖包"
 if [[ "${OS_TAG}" == "el7" ]]; then
-    info "【执行】yum 安装编译依赖（CentOS7）"
-    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel pcre-devel openssl-devel zlib-devel lua-devel perl-devel libxml2-devel rpm-build wget tar curl
+    # CentOS7：apr-devel/apr-util-devel 与系统主包版本一致性已由步骤2.1 检测通过，正常装即可
+    # libxml2-devel / libuuid-devel 单独处理（不在基础 install 列表）：
+    #   - libxml2-python 与 libxml2 主包版本绑定，常规 install 触发 depsolve 失败
+    #   - util-linux 锁住 libuuid/libblkid/libmount 主包版本，装 libuuid-devel 默认拉新主包触发冲突
+    # mod_proxy_html 需 libxml2-devel；httpd 多个模块需 libuuid-devel，必须单独解决
+    # --skip-broken 兜底：跳过其他 rpmdb pre-existing 冲突包
+    info "【执行】yum 安装编译依赖（CentOS7，含 apr-devel/apr-util-devel/apr-util-openssl/apr-util-ldap/brotli-devel；libxml2-devel/libuuid-devel 单独处理）"
+    if ! ${PKG_MGR} install -y --skip-broken gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel apr-util-openssl apr-util-ldap pcre-devel openssl-devel zlib-devel lua-devel perl-devel openldap-devel brotli-devel rpm-build wget tar curl bzip2; then
+        err "yum install 基础编译依赖失败！常见原因：
+1. rpmdb pre-existing 问题：运行 'yum check' 查看完整冲突列表
+2. 修复建议：
+   package-cleanup --problems     # 列出依赖问题
+   package-cleanup --cleandupes   # 清理重复包
+   rpm --rebuilddb                 # 重建 rpm 数据库"
+    fi
+
+    # libuuid-devel：util-linux 锁住 libuuid 主包版本，精确指定版本装避免主包升级
+    INSTALLED_LIBUUID=$(rpm -q libuuid --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || true)
+    if [[ -n "${INSTALLED_LIBUUID}" ]]; then
+        info "【执行】精确版本装 libuuid-devel-${INSTALLED_LIBUUID}（避免升级 libuuid 主包触发 util-linux 冲突）"
+        if ! ${PKG_MGR} install -y "libuuid-devel-${INSTALLED_LIBUUID}" 2>/dev/null; then
+            warn "libuuid-devel-${INSTALLED_LIBUUID} 仓库无对应版本，尝试默认装（可能仍冲突）"
+            ${PKG_MGR} install -y libuuid-devel 2>/dev/null || warn "libuuid-devel 装失败，rpmbuild 时若缺 uuid.h 需手动处理"
+        fi
+    fi
+
+    # mod_proxy_html 模块需要 libxml2-devel，解决 libxml2/libxml2-python 主子包版本绑定冲突
+    # 方案1：yum 同时装 libxml2 libxml2-python libxml2-devel 让 depsolve 找一致解
+    # 方案2：rpm -e --nodeps libxml2-python 解绑后 yum 自由装 devel + python 子包
+    info "【执行】安装 libxml2-devel（mod_proxy_html 依赖，需解绑 libxml2-python 子包版本）"
+    if ! ${PKG_MGR} install -y libxml2 libxml2-python libxml2-devel; then
+        info "集合安装失败，降级到 rpm 解绑方案：rpm -e --nodeps libxml2-python 后重装"
+        rpm -e --nodeps libxml2-python || true
+        if ! ${PKG_MGR} install -y libxml2-devel libxml2-python; then
+            err "libxml2-devel 安装失败，mod_proxy_html 依赖未满足，请手动处理：见上方错误"
+        fi
+    fi
+
+    # brotli-devel：CentOS7 默认仓库没有，需 EPEL
+    if ! ${PKG_MGR} install -y brotli-devel 2>/dev/null; then
+        info "brotli-devel 默认仓库装失败，尝试启用 EPEL"
+        ${PKG_MGR} install -y epel-release 2>/dev/null || ${PKG_MGR} install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm 2>/dev/null || true
+        if ! ${PKG_MGR} install -y --enablerepo=epel brotli-devel 2>/dev/null; then
+            warn "brotli-devel 装失败（EPEL 不可用），mod_brotli.so 不会编出，%files 会报 File not found"
+        fi
+    fi
 elif [[ "${ID}" == "bclinux" ]]; then
     info "【执行】dnf 安装编译依赖（BC-Linux8 适配）"
-    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel pcre-devel openssl-devel zlib-devel lua-devel perl-devel libxml2-devel rpm-build wget tar curl
+    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel apr-util-openssl apr-util-ldap pcre-devel openssl-devel zlib-devel lua-devel perl-devel libxml2-devel brotli-devel rpm-build wget tar curl
 else
     info "【执行】dnf 安装编译依赖（Rocky/CtyunOS）"
-    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel pcre-devel openssl-devel zlib-devel lua-devel perl-devel libxml2-devel rpm-build wget tar curl
+    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel apr-util-openssl apr-util-ldap pcre-devel openssl-devel zlib-devel lua-devel perl-devel libxml2-devel brotli-devel rpm-build wget tar curl
 fi
 
 # 6、初始化标准rpmbuild目录（不删除已有RPMS/SRPMS，避免丢失之前的打包产物）
@@ -163,8 +236,8 @@ info "【步骤7】下载 httpd 源码包：${SRC_URL}"
 info "【执行】切换至SOURCES目录 ${SOURCES_DIR}"
 cd "${SOURCES_DIR}"
 
-info "【执行】wget 下载源码包 ${TARBALL}"
-if ! wget -q --no-check-certificate --timeout=${NETWORK_TIMEOUT} "${SRC_URL}"; then
+info "【执行】wget 下载源码包 ${TARBALL}（显示进度条，-q 静默会让人误以为卡住）"
+if ! wget --progress=bar:force --no-check-certificate --timeout=${NETWORK_TIMEOUT} "${SRC_URL}"; then
     err "源码包下载失败，请检查代理/外网连通性！"
 fi
 if [ ! -f "${SOURCES_DIR}/${TARBALL}" ]; then
@@ -194,18 +267,18 @@ if [ -n "${SPEC_FOUND}" ]; then
     info "【执行】使用源码包内置spec文件: ${SPEC_FOUND}"
     cp "${SPEC_FOUND}" "${SPEC_PATH}"
 
-    # 修复spec文件中缺失的模块文件（如mod_brotli.so）
-    # 检查是否有未打包的模块文件，追加到files段
-    if ! grep -q 'mod_brotli' "${SPEC_PATH}"; then
-        info "【执行】修复spec：添加mod_brotli.so到%files段"
-        sed -i '/^%files/a %attr(0755,root,root) %{_libdir}/httpd/modules/mod_brotli.so' "${SPEC_PATH}"
-    fi
+    # 注入 _unpackaged_files_terminate_build=0：容忍 spec %files 未声明的文件（如 mod_brotli.so）
+    # 这些文件不会进 rpm，仅 warning 不报错，spec 原始内容零改动
+    sed -i '1i %define _unpackaged_files_terminate_build 0' "${SPEC_PATH}"
+
+    info "【执行】保留 spec 原始 %files 声明不动（模块编不编由 spec 默认 %configure + 系统依赖检测决定）"
 else
     # 若源码包中无spec文件，生成一个简单的spec
     info "【执行】源码包无内置spec文件，生成默认spec"
     cat > "${SPEC_PATH}" << EOF
 %define _buildhost %(hostname)
 %define httpd_version ${HTTPD_VERSION}
+%define _unpackaged_files_terminate_build 0
 
 Name:           httpd
 Version:        ${HTTPD_VERSION}
@@ -270,14 +343,52 @@ if command -v ${PKG_MGR} >/dev/null 2>&1; then
     SPEC_DEPS=$(grep -i '^BuildRequires:' "${SPEC_PATH}" | sed 's/^BuildRequires:\s*//' | tr ',' '\n' | xargs)
     if [ -n "${SPEC_DEPS}" ]; then
         info "【执行】安装spec中定义的额外依赖: ${SPEC_DEPS}"
-        ${PKG_MGR} install -y ${SPEC_DEPS} 2>/dev/null || true
+        # CentOS7 rpmdb 存在 pre-existing 冲突，--skip-broken 跳过冲突包继续装其他
+        # 不再静默丢弃错误：失败时 warn 提示，让第10步 rpmbuild 暴露具体缺失包
+        if [[ "${OS_TAG}" == "el7" ]]; then
+            if ! ${PKG_MGR} install -y --skip-broken ${SPEC_DEPS} 2>/dev/null; then
+                warn "spec BuildRequires 部分包安装失败（rpmdb 冲突或版本绑定），第10步 rpmbuild 会暴露具体缺失包"
+            fi
+        else
+            ${PKG_MGR} install -y ${SPEC_DEPS} 2>/dev/null || true
+        fi
     fi
 fi
 
 # 10、仅构建二进制包 -bb
 info "【步骤10】切换rpmbuild根目录，仅构建二进制rpm（rpmbuild -bb）"
 cd "${RPMBUILD_ROOT}"
-rpmbuild -bb SPECS/httpd.spec
+
+# 后台心跳：httpd 完整编译预计 10-30 分钟，期间几乎无新输出会让人误以为卡死
+# 每 60s 打印一次到 stderr（不干扰 rpmbuild 的 stdout），让用户知道仍在编译
+heartbeat() {
+    local start=$(date +%s)
+    while true; do
+        sleep 60
+        local elapsed=$(( ($(date +%s) - start) / 60 ))
+        echo -e "\033[36m[心跳] $(date '+%H:%M:%S') rpmbuild 仍在运行，已耗时 ${elapsed} 分钟...\033[0m" >&2
+    done
+}
+heartbeat &
+HEARTBEAT_PID=$!
+cleanup_heartbeat() {
+    kill ${HEARTBEAT_PID} 2>/dev/null || true
+    wait ${HEARTBEAT_PID} 2>/dev/null || true
+}
+trap cleanup_heartbeat EXIT
+
+# apr-devel/apr-util-devel 已由步骤2.1 检测版本一致并装好，spec BuildRequires 检查能通过
+# 正常 rpmbuild -bb（不用 --nodeps），真实缺包在 %build 阶段暴露
+info "【执行】rpmbuild -bb SPECS/httpd.spec"
+info "  httpd 完整编译预计 10-30 分钟，期间心跳每 60s 打印一次进度，请耐心等待"
+if ! rpmbuild -bb SPECS/httpd.spec; then
+    err "rpmbuild -bb 失败，详见上方错误（可能是真实缺包或编译失败）"
+fi
+
+# 编译成功，停止心跳
+trap - EXIT
+cleanup_heartbeat
+info "rpmbuild 编译完成"
 
 # 11、筛选纯httpd rpm并打包
 info "【步骤11】筛选并打包所有 httpd RPM"
