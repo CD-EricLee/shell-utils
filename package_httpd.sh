@@ -79,6 +79,9 @@ elif [[ "${ID}" == "bclinux" && "${MAJOR_VER}" == "8" ]]; then
 elif [[ "${ID}" == "rocky" && "${MAJOR_VER}" =~ ^(8|9)$ ]]; then
     OS_TAG="el${MAJOR_VER}"
     PKG_MGR="dnf"
+elif [[ "${ID}" == "anolis" && "${MAJOR_VER}" =~ ^(7|8|9)$ ]]; then
+    OS_TAG="el${MAJOR_VER}"
+    PKG_MGR="dnf"
 elif [[ "${ID}" == "ctyunos" ]]; then
     OS_TAG="ctyunos"
     PKG_MGR="dnf"
@@ -87,41 +90,47 @@ else
 1. CentOS 7.x 全系列
 2. BCLinux 8.x 全系列
 3. Rocky Linux 8.x / 9.x
-4. CTyunOS 2.0.1 / 23.01"
+4. Anolis OS 7.x / 8.x / 9.x
+5. CTyunOS 2.0.1 / 23.01"
 fi
 
 info "发行版ID: ${ID} | 完整版本: ${VERSION_ID} | 主版本: ${MAJOR_VER}"
 info "系统标识: ${OS_TAG} | 包管理器: ${PKG_MGR}"
 info "待编译 httpd 版本: ${HTTPD_VERSION}"
 
-# 2.1、检测 apr/apr-util 版本（httpd 编译强依赖，主包与 devel 版本必须一致）
-info "【步骤2.1】检测 apr/apr-util 版本（httpd 编译依赖，主包与 devel 版本必须一致）"
-APR_VER=$(rpm -q apr --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
-APR_DEVEL_VER=$(rpm -q apr-devel --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
-APU_VER=$(rpm -q apr-util --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
-APU_DEVEL_VER=$(rpm -q apr-util-devel --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
+# 2.1、检测 apr/apr-util 版本（仅 CentOS7：apr-util 1.6.1 主包与官方源 1.5.2 devel 版本冲突问题）
+# 其他系统（Anolis/Rocky/BCLinux/CtyunOS）官方源 apr/apr-util devel 版本能自动对齐，步骤5 装即可
+if [[ "${OS_TAG}" == "el7" ]]; then
+    info "【步骤2.1】检测 apr/apr-util 版本（CentOS7 专属：apr-util 1.6.1 主包与官方源 1.5.2 devel 版本冲突问题）"
+    APR_VER=$(rpm -q apr --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
+    APR_DEVEL_VER=$(rpm -q apr-devel --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
+    APU_VER=$(rpm -q apr-util --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
+    APU_DEVEL_VER=$(rpm -q apr-util-devel --qf '%{VERSION}-%{RELEASE}' 2>/dev/null || echo "")
 
-info "  apr=${APR_VER:-未安装}  apr-devel=${APR_DEVEL_VER:-未安装}"
-info "  apr-util=${APU_VER:-未安装}  apr-util-devel=${APU_DEVEL_VER:-未安装}"
+    info "  apr=${APR_VER:-未安装}  apr-devel=${APR_DEVEL_VER:-未安装}"
+    info "  apr-util=${APU_VER:-未安装}  apr-util-devel=${APU_DEVEL_VER:-未安装}"
 
-APR_ERR=""
-if [[ -z "${APR_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr 主包未安装"; fi
-if [[ -z "${APR_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-devel 未安装"; fi
-if [[ -n "${APR_VER}" && -n "${APR_DEVEL_VER}" && "${APR_VER}" != "${APR_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr(${APR_VER}) 与 apr-devel(${APR_DEVEL_VER}) 版本不一致"; fi
-if [[ -z "${APU_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util 主包未安装"; fi
-if [[ -z "${APU_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util-devel 未安装"; fi
-if [[ -n "${APU_VER}" && -n "${APU_DEVEL_VER}" && "${APU_VER}" != "${APU_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util(${APU_VER}) 与 apr-util-devel(${APU_DEVEL_VER}) 版本不一致"; fi
+    APR_ERR=""
+    if [[ -z "${APR_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr 主包未安装"; fi
+    if [[ -z "${APR_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-devel 未安装"; fi
+    if [[ -n "${APR_VER}" && -n "${APR_DEVEL_VER}" && "${APR_VER}" != "${APR_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr(${APR_VER}) 与 apr-devel(${APR_DEVEL_VER}) 版本不一致"; fi
+    if [[ -z "${APU_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util 主包未安装"; fi
+    if [[ -z "${APU_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util-devel 未安装"; fi
+    if [[ -n "${APU_VER}" && -n "${APU_DEVEL_VER}" && "${APU_VER}" != "${APU_DEVEL_VER}" ]]; then APR_ERR="${APR_ERR}\n  - apr-util(${APU_VER}) 与 apr-util-devel(${APU_DEVEL_VER}) 版本不一致"; fi
 
-if [[ -n "${APR_ERR}" ]]; then
-    err "apr/apr-util 检测不通过：${APR_ERR}
+    if [[ -n "${APR_ERR}" ]]; then
+        err "apr/apr-util 检测不通过：${APR_ERR}
 
 httpd 打包需要 apr+apr-devel、apr-util+apr-util-devel（主包与 devel 版本必须一致）。
 请手动安装版本一致的 apr/apr-util 全套后重新执行脚本。
 
 提示：CentOS7 官方源 apr/apr-util 为 1.4.8/1.5.2，若系统装的是 1.6.1 等非官方版本，
   官方源没有对应 devel 包，需从源码编译 apr/apr-util 或将系统 apr/apr-util 降级到官方版本。"
+    fi
+    info "apr/apr-util 版本检测通过"
+else
+    info "【步骤2.1】非 CentOS7 系统，apr/apr-util 依赖由步骤5 dnf install 自动装（官方源版本自动对齐），跳过预检测"
 fi
-info "apr/apr-util 版本检测通过"
 
 # 标记：是否需要刷新软件源缓存
 SKIP_CACHE_REFRESH=0
@@ -219,10 +228,10 @@ if [[ "${OS_TAG}" == "el7" ]]; then
     fi
 elif [[ "${ID}" == "bclinux" ]]; then
     info "【执行】dnf 安装编译依赖（BC-Linux8 适配）"
-    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel apr-util-openssl apr-util-ldap pcre-devel openssl-devel zlib-devel lua-devel perl-devel libxml2-devel brotli-devel rpm-build wget tar curl
+    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel apr-util-openssl apr-util-ldap pcre-devel openssl-devel zlib-devel lua-devel perl perl-devel libxml2-devel brotli-devel libuuid-devel rpm-build wget tar curl
 else
-    info "【执行】dnf 安装编译依赖（Rocky/CtyunOS）"
-    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel apr-util-openssl apr-util-ldap pcre-devel openssl-devel zlib-devel lua-devel perl-devel libxml2-devel brotli-devel rpm-build wget tar curl
+    info "【执行】dnf 安装编译依赖（Rocky/Anolis/CtyunOS）"
+    ${PKG_MGR} install -y gcc gcc-c++ make autoconf libtool apr-devel apr-util-devel apr-util-openssl apr-util-ldap pcre-devel openssl-devel zlib-devel lua-devel perl perl-devel libxml2-devel brotli-devel libuuid-devel rpm-build wget tar curl
 fi
 
 # 6、初始化标准rpmbuild目录（不删除已有RPMS/SRPMS，避免丢失之前的打包产物）
