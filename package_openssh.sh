@@ -78,6 +78,9 @@ elif [[ "${ID}" == "bclinux" && "${MAJOR_VER}" == "8" ]]; then
 elif [[ "${ID}" == "rocky" && "${MAJOR_VER}" =~ ^(8|9)$ ]]; then
     OS_TAG="el${MAJOR_VER}"
     PKG_MGR="dnf"
+elif [[ "${ID}" == "anolis" && "${MAJOR_VER}" =~ ^(7|8|9)$ ]]; then
+    OS_TAG="el${MAJOR_VER}"
+    PKG_MGR="dnf"
 elif [[ "${ID}" == "ctyunos" ]]; then
     OS_TAG="ctyunos"
     PKG_MGR="dnf"
@@ -86,7 +89,8 @@ else
 1. CentOS 7.x 全系列
 2. BCLinux 8.x 全系列
 3. Rocky Linux 8.x / 9.x
-4. CTyunOS 2.0.1 / 23.01"
+4. Anolis OS 7.x / 8.x / 9.x
+5. CTyunOS 2.0.1 / 23.01"
 fi
 
 info "发行版ID: ${ID} | 完整版本: ${VERSION_ID} | 主版本: ${MAJOR_VER}"
@@ -148,7 +152,7 @@ elif [[ "${ID}" == "bclinux" ]]; then
     info "【执行】dnf 安装编译依赖（BC-Linux8 适配，剔除不存在的依赖）"
     ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel rpm-build wget tar curl perl-generators perl
 else
-    info "【执行】dnf 安装编译依赖（Rocky/CtyunOS，补充perl）"
+    info "【执行】dnf 安装编译依赖（Rocky/Anolis/CtyunOS，补充perl）"
     ${PKG_MGR} install -y gcc gcc-c++ make automake autoconf libtool zlib-devel openssl-devel pam-devel libselinux-devel krb5-devel libedit-devel rpm-build wget tar curl perl-generators perl
 fi
 
